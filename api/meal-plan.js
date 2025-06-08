@@ -1,11 +1,14 @@
-const express = require('express');
-const app = express();
-app.use(express.json());
+// api/meal-plan.js
 
-app.post('/api/meal-plan', (req, res) => {
+export default function handler(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
   const { preferences, userProfile } = req.body;
 
-  // Simple static meal plan for testing
+  // Sample static meal plan
   const meals = [
     {
       day: "Monday",
@@ -18,9 +21,5 @@ app.post('/api/meal-plan', (req, res) => {
     }
   ];
 
-  res.json({ meals });
-});
-
-app.listen(3000, () => {
-  console.log('Operator listening on http://localhost:3000/api/meal-plan');
-});
+  res.status(200).json({ meals });
+}
