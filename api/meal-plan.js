@@ -6,9 +6,7 @@ export default function handler(req, res) {
     return;
   }
 
-  const body = req.body || {};
-  const { preferences, userProfile } = body;
-
+  // Unique meals for each day
   const meals = [
     {
       day: "Monday",
