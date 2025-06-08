@@ -1,39 +1,25 @@
 // api/meal-plan.js
 
-const meals = [
-  {
-    day: "Monday",
-    recipe_name: "Veggie Pasta",
-    // ...other fields
-  },
-  {
-    day: "Tuesday",
-    recipe_name: "Chickpea Stir-Fry",
-    // ...other fields
-  },
-  {
-    day: "Wednesday",
-    recipe_name: "Lentil Soup",
-    // ...other fields
-  },
-  {
-    day: "Thursday",
-    recipe_name: "Sweet Potato Curry",
-    // ...other fields
-  },
-  {
-    day: "Friday",
-    recipe_name: "Bean Chili",
-    // ...other fields
-  },
-  {
-    day: "Saturday",
-    recipe_name: "Veggie Pizza",
-    // ...other fields
-  },
-  {
-    day: "Sunday",
-    recipe_name: "Tofu Stir Fry",
-    // ...other fields
+export default function handler(req, res) {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' });
+    return;
   }
-];
+
+  // Defensive: support both Vercel and local dev
+  const body = req.body || {};
+  const { preferences, userProfile } = body;
+
+  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const meals = days.map((day, i) => ({
+    day,
+    recipe_name: `Test Meal ${i + 1}`,
+    description: `This is a test meal for ${day}.`,
+    picture_url: "https://placehold.co/400x300",
+    ingredients: [`ingredient${i + 1}a`, `ingredient${i + 1}b`],
+    instructions: `Instructions for ${day}.`,
+    estimated_cost: 5.00 + i,
+  }));
+
+  res.status(200).json({ meals });
+}
