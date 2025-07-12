@@ -1,6 +1,4 @@
-// api/add-to-basket.js
-
-import { searchGoogleProduct } from './product-search-helpers.js';
+import { searchGoogleProduct } from "./product-search-helpers";
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -10,21 +8,15 @@ export default async function handler(req, res) {
 
   const { supermarket, credentials, items } = req.body;
 
-  // --- Product Matching ---
-  const matchedItems = await Promise.all(items.map(async (item) => {
-    const match = await searchGoogleProduct(item, supermarket);
-    return {
-      ...item,
-      matched_product: match ? {
-        title: match.title,
-        price: match.price,
-        link: match.link,
-        source: "Google Shopping"
-      } : null
-    };
-  }));
+  // Go through each item and try to find a product match using Google Shopping
+  const matchedItems = await Promise.all(
+    (items || []).map(async item => {
+      const matched_product = await searchGoogleProduct(item, supermarket);
+      return { ...item, matched_product };
+    })
+  );
 
-  // --- Simulate "building the basket" (future: real automation) ---
+  // Simulate "building the basket"
   let basketUrl = "#";
   if (supermarket === "tesco") basketUrl = "https://www.tesco.com/groceries/en-GB/basket";
   if (supermarket === "sainsburys") basketUrl = "https://www.sainsburys.co.uk/gol-ui/Basket";
