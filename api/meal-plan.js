@@ -1,60 +1,74 @@
 // /api/meal-plan.js
 
-const SPOONACULAR_API_KEY = '79d935a7f54d4c639a511872383bb0e4';
-const SERPAPI_KEY = '52d217826ca9bd2e027e15ba2f1f27e463d263f3388c0172572f8b3231aa0f56';
-
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
-const supermarkets = [
-  { name: "tesco", search: "Tesco UK" },
-  { name: "sainsburys", search: "Sainsbury's UK" },
-  { name: "asda", search: "Asda UK" },
-  { name: "aldi", search: "Aldi UK" },
-];
+const SPOONACULAR_API_KEY = process.env.SPOONACULAR_API_KEY;
+const SERPAPI_KEY = process.env.SERPAPI_KEY;
 
-// --------- Helper Functions ---------
+const SUPERMARKETS = ['tesco', 'sainsburys', 'asda', 'aldi'];
 
-async function fetchSpoonacularRecipes(userProfile, numMeals = 7) {
-  // Build query params
-  const diet = userProfile.dietaryPreferences?.join(',') || '';
-  const intolerances = userProfile.allergies?.join(',') || '';
-  // We'll use 'random recipes' endpoint as Spoonacular does not natively support full week plans per UK market
-  // For full plans, you could try 'meal planner' but requires more setup.
-  const url = `https://api.spoonacular.com/recipes/random?number=${numMeals}&tags=${encodeURIComponent(diet)}&intolerances=${encodeURIComponent(intolerances)}&apiKey=${SPOONACULAR_API_KEY}`;
+function buildSpoonacularTags(profile) {
+  // Lowercase, comma-separated
+  return (profile.dietaryPreferences || []).map(tag => tag.toLowerCase()).join(',');
+}
+
+function buildSpoonacularIntolerances(profile) {
+  // Lowercase, comma-separated
+  return (profile.allergies || []).map(tag => tag.toLowerCase()).join(',');
+}
+
+async function fetchSpoonacularMeals(userProfile, nMeals = 7) {
+  const tags = buildSpoonacularTags(userProfile);
+  const intolerances = buildSpoonacularIntolerances(userProfile);
+
+  const url = `https://api.spoonacular.com/recipes/random?number=${nMeals}&tags=${encodeURIComponent(tags)}&intolerances=${encodeURIComponent(intolerances)}&apiKey=${SPOONACULAR_API_KEY}`;
+
   const res = await fetch(url);
-  if (!res.ok) throw new Error("Spoonacular error: " + await res.text());
+  if (!res.ok) throw new Error("Spoonacular error: " + res.statusText);
   const data = await res.json();
   return data.recipes || [];
 }
 
-async function lookupPricesGoogleShopping(ingredient) {
+async function lookupPricesSerpApi(ingredientName) {
+  // We'll return a map supermarket -> {price, url, title}
   const results = {};
-  for (const { name: supermarket, search } of supermarkets) {
-    const q = `${ingredient} ${search}`;
-    const url = `https://serpapi.com/search.json?engine=google_shopping&q=${encodeURIComponent(q)}&gl=uk&hl=en&api_key=${SERPAPI_KEY}`;
+  await Promise.all(SUPERMARKETS.map(async (store) => {
     try {
-      const res = await fetch(url);
+      const res = await fetch(`https://serpapi.com/search.json?engine=google_shopping&q=${encodeURIComponent(ingredientName + ' ' + store)}&api_key=${SERPAPI_KEY}`);
       const data = await res.json();
-      // Find first matching product with price
-      const first = data.shopping_results?.find(item => item.price) || null;
-      if (first) {
-        let priceValue = parseFloat((first.price || '').replace(/[£$€,]/g, ''));
-        if (isNaN(priceValue)) priceValue = 2.5;
-        results[supermarket] = {
-          price: priceValue,
-          url: first.link || '',
+      // Find first valid price in results
+      const product = (data.shopping_results || [])[0];
+      if (product && product.price) {
+        // Parse price like "£1.50"
+        let price = product.price.replace(/[^\d.]/g, '');
+        results[store] = {
+          price: parseFloat(price) || 2.50, // fallback
+          url: product.link,
+          title: product.title
         };
       } else {
-        results[supermarket] = { price: 2.5, url: '', noMatch: true };
+        results[store] = { price: 2.50, url: '', title: 'No match' };
       }
     } catch (err) {
-      results[supermarket] = { price: 2.5, url: '', noMatch: true };
+      results[store] = { price: 2.50, url: '', title: 'API error' };
     }
-  }
+  }));
   return results;
 }
 
-// --------- Main API Handler ---------
+function getDayName(idx) {
+  const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+  return days[idx % 7];
+}
+
+function scaleAmount(amount, householdSize) {
+  // A very naive scaling: "200g" -> (200 * householdSize) + "g"
+  const match = /^(\d+(?:\.\d+)?)([a-zA-Z ]+)$/.exec(amount);
+  if (!match) return amount;
+  const value = parseFloat(match[1]);
+  const unit = match[2];
+  return (value * householdSize) + unit;
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -62,77 +76,67 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { userProfile } = req.body || {};
-  if (!userProfile) {
-    res.status(400).json({ error: "Missing userProfile" });
-    return;
-  }
-
   try {
-    // 1. Get 7 meals from Spoonacular
-    const spoonMeals = await fetchSpoonacularRecipes(userProfile, 7);
+    const { userProfile } = req.body || {};
+    if (!userProfile) throw new Error("Missing userProfile");
 
-    // 2. Map to output structure (with prices, nutrition, etc)
-    const mealsWithPrices = await Promise.all(spoonMeals.map(async (spoonMeal, i) => {
-      const day = [
-        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
-      ][i % 7];
+    const householdSize = userProfile.householdSize || 1;
+    const budget = userProfile.weeklyBudget || 50;
 
-      // Get all unique ingredient names for price lookups
-      const ingredientObjects = (spoonMeal.extendedIngredients || []).map(ing => ({
-        name: ing.nameClean || ing.name || "",
-        amount: ing.original || "",
+    // Step 1: Get 7 random recipes
+    const mealsRaw = await fetchSpoonacularMeals(userProfile, 7);
+
+    // Step 2: For each recipe, lookup prices for ingredients
+    const mealPlan = [];
+    let totalWeekCost = { tesco: 0, sainsburys: 0, asda: 0, aldi: 0 };
+
+    for (let i = 0; i < mealsRaw.length; ++i) {
+      const spoonMeal = mealsRaw[i];
+      // Limit ingredients for pricing (to avoid rate limits)
+      const mainIngredients = (spoonMeal.extendedIngredients || []).slice(0, 4);
+
+      const ingredients = await Promise.all(mainIngredients.map(async (ing) => {
+        const scaledAmount = scaleAmount(ing.amount + (ing.unitShort || ''), householdSize);
+        const prices = await lookupPricesSerpApi(ing.nameClean || ing.name);
+        return {
+          name: ing.nameClean || ing.name,
+          amount: scaledAmount,
+          prices
+        };
       }));
 
-      // For each ingredient, get prices
-      const ingredientsWithPrices = await Promise.all(
-        ingredientObjects.map(async (ing) => {
-          if (!ing.name) return null;
-          const prices = await lookupPricesGoogleShopping(ing.name);
-          return {
-            ...ing,
-            prices
-          };
-        })
-      );
-
-      // Calculate cost per supermarket
+      // Compute cost_by_supermarket
       const cost_by_supermarket = {};
-      for (const { name: supermarket } of supermarkets) {
-        cost_by_supermarket[supermarket] =
-          ingredientsWithPrices.reduce((sum, ing) => sum + (ing?.prices?.[supermarket]?.price || 2.5), 0);
-        cost_by_supermarket[supermarket] = Number(cost_by_supermarket[supermarket].toFixed(2));
-      }
+      SUPERMARKETS.forEach(store => {
+        cost_by_supermarket[store] = ingredients.reduce((sum, ing) => sum + (ing.prices[store]?.price || 0), 0);
+        totalWeekCost[store] += cost_by_supermarket[store];
+      });
 
-      return {
-        day,
+      mealPlan.push({
+        day: getDayName(i),
         recipe_name: spoonMeal.title,
         description: spoonMeal.summary ? spoonMeal.summary.replace(/<[^>]+>/g, '') : "",
-        ingredients: ingredientsWithPrices.filter(Boolean),
-        instructions: Array.isArray(spoonMeal.analyzedInstructions) && spoonMeal.analyzedInstructions.length > 0
-          ? spoonMeal.analyzedInstructions[0].steps.map(step => step.step)
-          : [spoonMeal.instructions || "No instructions"],
-        nutrition: spoonMeal.nutrition || {}, // Spoonacular only includes this for certain calls
-        picture_url: spoonMeal.image || "",
-        cost_by_supermarket
-      };
-    }));
-
-    // 3. Calculate total week cost per supermarket
-    const total_week_cost = {};
-    for (const { name: supermarket } of supermarkets) {
-      total_week_cost[supermarket] = mealsWithPrices.reduce(
-        (sum, meal) => sum + (meal.cost_by_supermarket[supermarket] || 0), 0
-      );
-      total_week_cost[supermarket] = Number(total_week_cost[supermarket].toFixed(2));
+        ingredients,
+        nutrition: spoonMeal.nutrition || null,
+        instructions: (spoonMeal.analyzedInstructions?.[0]?.steps || []).map(s => s.step) || [],
+        cost_by_supermarket,
+        image: spoonMeal.image || '',
+        estimated_cost: Math.min(...Object.values(cost_by_supermarket)),
+      });
     }
 
-    res.status(200).json({
-      meals: mealsWithPrices,
-      total_week_cost
+    // Round totalWeekCost
+    Object.keys(totalWeekCost).forEach(k => {
+      totalWeekCost[k] = Math.round((totalWeekCost[k] + Number.EPSILON) * 100) / 100;
     });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Meal plan generation failed.", details: error.message });
+
+    res.status(200).json({
+      meals: mealPlan,
+      total_week_cost: totalWeekCost
+    });
+
+  } catch (err) {
+    console.error('Meal plan error:', err);
+    res.status(500).json({ error: err.message || 'Unknown error' });
   }
 }
