@@ -1,109 +1,79 @@
 // /api/meal-plan.js
 
-const allMeals = [
-  // ... (add more recipes here as you grow)
-  {
-    day: "Any",
-    recipe_name: "Veggie Pasta",
-    diet: "vegetarian",
-    allergies: ["gluten"],
-    ingredients: [
-      { name: "penne pasta", amount: 100 }, // base amount per person
-      { name: "zucchini", amount: 0.5 },
-      { name: "bell pepper", amount: 0.5 },
-      { name: "olive oil", amount: 1 },
-      { name: "garlic", amount: 1 }
-    ],
-    nutrition: { calories: 350 },
-    description: "Nutritious pasta loaded with veggies.",
-    instructions: ["Cook pasta, sauté veggies, combine, season."],
-  },
-  // ... more meals with different diets, allergens, etc
+const SPOONACULAR_API_KEY = "79d935a7f54d4c639a511872383bb0e4";
+
+const daysOfWeek = [
+  "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
 ];
 
-// Supermarket price map (as before, expand for more stores)
-const supermarketPrices = {
-  "penne pasta": { tesco: { price: 1.0 }, sainsburys: { price: 1.1 } },
-  // ...
-};
+// Helper to fetch recipes from Spoonacular
+async function fetchRecipesFromSpoonacular({ diet, allergies, householdSize }) {
+  const intolerances = allergies && allergies.length > 0 ? `&intolerances=${allergies.join(',')}` : "";
+  const dietParam = diet ? `&diet=${diet}` : "";
+  const url = `https://api.spoonacular.com/recipes/complexSearch?number=7${dietParam}${intolerances}&addRecipeInformation=true&fillIngredients=true&apiKey=${SPOONACULAR_API_KEY}`;
 
-const supermarkets = ["tesco", "sainsburys"];
+  const resp = await fetch(url);
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  if (!data.results || data.results.length === 0) return null;
 
-function getPricesForIngredient(ingredient) {
-  const info = supermarketPrices[ingredient.toLowerCase()];
-  return supermarkets.reduce((obj, name) => {
-    obj[name] = info && info[name] ? info[name] : { price: 1.0 };
-    return obj;
-  }, {});
-}
-
-// Utility: Randomize, filter by dietary/allergy, and scale for family size
-function selectMeals(preferences, allergies, householdSize, budget) {
-  let filteredMeals = allMeals;
-
-  if (preferences && preferences.length) {
-    filteredMeals = filteredMeals.filter(meal =>
-      preferences.every(p =>
-        meal.diet === p || (Array.isArray(meal.diet) && meal.diet.includes(p))
-      )
-    );
-  }
-  if (allergies && allergies.length) {
-    filteredMeals = filteredMeals.filter(meal =>
-      !meal.allergies || !meal.allergies.some(a => allergies.includes(a))
-    );
-  }
-  // Shuffle and pick 7
-  filteredMeals = filteredMeals.sort(() => Math.random() - 0.5).slice(0, 7);
-
-  // Scale ingredients for family size
-  filteredMeals = filteredMeals.map(meal => ({
-    ...meal,
-    ingredients: meal.ingredients.map(ing => ({
-      ...ing,
-      amount: Math.round(ing.amount * (householdSize || 1))
-    }))
+  // Map Spoonacular recipes to SmartCart structure
+  return data.results.slice(0, 7).map((result, idx) => ({
+    day: daysOfWeek[idx] || "",
+    recipe_name: result.title,
+    description: result.summary?.replace(/<[^>]+>/g, '') || "", // Remove HTML
+    image: result.image,
+    ingredients: result.extendedIngredients.map(ing => ({
+      name: ing.name,
+      amount: `${ing.amount * (householdSize || 2)} ${ing.unit}` // Scale to household size
+    })),
+    nutrition: {}, // Spoonacular provides nutrition on detail call (optional)
+    instructions: result.analyzedInstructions?.[0]?.steps.map(step => step.step) || [],
   }));
-
-  return filteredMeals;
 }
 
-export default function handler(req, res) {
+// Fallback: hardcoded/AI recipes
+function getFallbackMeals({diet}) {
+  // Reuse your old fallback logic or use previous static meals array
+  return [
+    /* ...your existing fallback meals array here... */
+  ];
+}
+
+export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' });
     return;
   }
 
-  const { dietaryPreferences = [], allergies = [], householdSize = 1, budget = 40 } = req.body;
+  // Extract user preferences from request
+  const { dietaryPreferences, allergies, householdSize, budget } = req.body;
 
-  let meals = selectMeals(dietaryPreferences, allergies, householdSize, budget);
+  // 1. Try Spoonacular
+  try {
+    const recipes = await fetchRecipesFromSpoonacular({
+      diet: (dietaryPreferences && dietaryPreferences[0]) || "",
+      allergies: allergies || [],
+      householdSize: householdSize || 2,
+      budget
+    });
+    if (recipes && recipes.length > 0) {
+      res.status(200).json({
+        meals: recipes,
+        // Optionally, add ingredient prices here using your supermarket logic
+        total_week_cost: {} // Placeholder, add calculation if needed
+      });
+      return;
+    }
+  } catch (err) {
+    // Log but continue to fallback
+    console.error("Spoonacular error", err);
+  }
 
-  const mealsWithPrices = meals.map(meal => {
-    const ingredientsWithPrices = meal.ingredients.map(ingredient => ({
-      ...ingredient,
-      prices: getPricesForIngredient(ingredient.name)
-    }));
-    // Calculate cost by supermarket
-    const cost_by_supermarket = supermarkets.reduce((obj, market) => {
-      obj[market] = ingredientsWithPrices.reduce(
-        (sum, ing) => sum + (ing.prices[market]?.price || 1.0),
-        0
-      );
-      return obj;
-    }, {});
-    return { ...meal, ingredients: ingredientsWithPrices, cost_by_supermarket };
-  });
-
-  // Weekly totals
-  const total_week_cost = supermarkets.reduce((obj, market) => {
-    obj[market] = mealsWithPrices.reduce(
-      (sum, meal) => sum + meal.cost_by_supermarket[market], 0
-    );
-    return obj;
-  }, {});
-
+  // 2. Fallback to static/AI-generated meal plan
+  const fallbackMeals = getFallbackMeals({diet: (dietaryPreferences && dietaryPreferences[0]) || ""});
   res.status(200).json({
-    meals: mealsWithPrices,
-    total_week_cost
+    meals: fallbackMeals,
+    total_week_cost: {}
   });
 }
