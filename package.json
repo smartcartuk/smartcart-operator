@@ -1,5 +1,11 @@
 {
   "name": "smartcart-operator",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "description": "SmartCart operator API for AI meal plan and supermarket price search.",
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "node-fetch": "^2.6.7"  // Only add if you use node-fetch for HTTP requests!
+  }
 }
-
